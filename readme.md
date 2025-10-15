@@ -1,6 +1,6 @@
-[#]Commands to run the framework
+# Commands to run the framework
 
-[##]1.In the root directory, run the following commands
+## 1.In the root directory, run the following commands
 
 ```
 python -m venv venv
@@ -18,11 +18,11 @@ pip install -r requirements.txt
 python -m grpc_tools.protoc -I./protos --python_out=. --grpc_python_out=. ./protos/federated.proto
 ```
 
-[###]Install pathmnist.npz dataset and store it in the root folder.
+### Install pathmnist.npz dataset and store it in the root folder.
 
-[##]2.Open multiple terminals
+## 2.Open multiple terminals
 
-[###]NOTE: Make sure to open every terminal in venv
+### NOTE: Make sure to open every terminal in venv
 
 ```
 One for server:
@@ -36,4 +36,4 @@ python fl_client.py --client-id="hospital-B" --data-path="pathmnist.npz"
 
 ```
 
-[##]3.To stop learning, press ctrl+c on every terminal.
+## 3.To stop learning, press ctrl+c on every terminal.
