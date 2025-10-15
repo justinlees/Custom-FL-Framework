@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+enum TrainingStatus {
+  IN_PROGRESS = 0;
+  COMPLETED = 1;
+}
+
+service FederatedLearning {
+  rpc RegisterClient(ClientRegistrationRequest) returns (ClientRegistrationResponse);
+  rpc GetLatestModel(GetLatestModelRequest) returns (GetLatestModelResponse);
+  rpc SubmitModelUpdate(ModelUpdateRequest) returns (ModelUpdateResponse);
+  rpc SubmitEvaluationResult(EvaluationResult) returns (ModelUpdateResponse);
+}
+
+message ClientRegistrationRequest {
+  string client_id = 1;
+}
+
+message ClientRegistrationResponse {
+  string message = 1;
+}
+
+message GetLatestModelRequest {
+  string client_id = 1;
+}
+
+message GetLatestModelResponse {
+  int32 round_number = 1;
+  bytes weights = 2;
+  string partner_id = 3;
+  int64 shared_seed = 4;
+  TrainingStatus status = 5;
+}
+
+message ModelUpdateRequest {
+  string client_id = 1;
+  int32 round_number = 2;
+  bytes weights = 3;
+}
+
+message ModelUpdateResponse {
+  string message = 1;
+}
+
+message EvaluationResult {
+  string client_id = 1;
+  int32 round_number = 2;
+  float loss = 3;
+  float metric = 4;
+}

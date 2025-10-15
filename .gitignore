@@ -1,0 +1,17 @@
+# Virtual environment
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Dataset files
+*.npz
+
+# Logs
+*.log
+
+# IDE/editor files
+.vscode/
+.idea/

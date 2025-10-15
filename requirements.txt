@@ -1,0 +1,12 @@
+# For numerical operations and machine learning
+numpy
+pandas
+scikit-learn
+
+# For gRPC communication
+grpcio
+grpcio-tools
+protobuf
+# For Deep Learning
+torch
+torchvision
