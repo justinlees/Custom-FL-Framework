@@ -1,18 +1,19 @@
 {
-  "clients_per_round": 2,
-  "total_rounds": 50,
+  "clients_per_round": 10,
+  "total_rounds": 100,
   "model_architecture": {
     "num_classes": 9,
     "total_weights_count": 19209
   },
   "training_params": {
-    "local_epochs": 5,
+    "local_epochs": 1,
     "learning_rate": 0.0005,
     "batch_size": 128,
     "grad_clip_norm": 1.0
   },
   "privacy_params": {
-    "clipping_bound": 10.0,
-    "noise_multiplier": 0.3
+    "target_delta": 1e-5,
+    "target_epsilon": 3.0,
+    "max_grad_norm": 1.0
   }
 }

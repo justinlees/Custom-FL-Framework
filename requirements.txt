@@ -3,6 +3,9 @@ numpy
 pandas
 scikit-learn
 
+#Privacy Library
+opacus
+
 # For gRPC communication
 grpcio
 grpcio-tools

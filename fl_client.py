@@ -11,24 +11,36 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from torchvision import transforms
 
+# --- Import Opacus ---
+from opacus import PrivacyEngine
+from opacus.utils.batch_memory_manager import BatchMemoryManager
+
 import federated_pb2
 import federated_pb2_grpc
 
 SERVER_ADDRESS = 'localhost:50051'
 
-# --- 1. Auto-detect and set the device (GPU or CPU) ---
+# --- Auto-detect and set the device (GPU or CPU) ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Net(nn.Module):
-    # ... (Net class is unchanged)
     def __init__(self, num_classes):
         super(Net, self).__init__()
-        self.layer1 = nn.Sequential(nn.Conv2d(3, 16, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2, 2))
-        self.layer2 = nn.Sequential(nn.Conv2d(16, 32, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2, 2))
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
         self.fc = nn.Linear(7 * 7 * 32, num_classes)
+
     def forward(self, x):
-        out = self.layer1(x); out = self.layer2(out)
-        out = out.reshape(out.size(0), -1); out = self.fc(out)
+        out = self.layer1(x)
+        out = self.layer2(out)
+        out = out.reshape(out.size(0), -1)
+        out = self.fc(out)
         return out
 
 class FLClient:
@@ -44,18 +56,24 @@ class FLClient:
         self.local_epochs = config['training_params']['local_epochs']
         self.learning_rate = config['training_params']['learning_rate']
         self.batch_size = config['training_params']['batch_size']
-        self.grad_clip_norm = config['training_params']['grad_clip_norm']
-        self.clipping_bound = config['privacy_params']['clipping_bound']
-        self.noise_multiplier = config['privacy_params']['noise_multiplier']
+        # Removed grad_clip_norm
+        # Opacus parameters
+        self.target_delta = config['privacy_params']['target_delta']
+        self.target_epsilon = config['privacy_params']['target_epsilon']
+        self.max_grad_norm = config['privacy_params']['max_grad_norm']
         
-        # --- 2. Move the model to the selected device ---
+        # Move the model to the selected device
         self.model = Net(num_classes=config['model_architecture']['num_classes']).to(DEVICE)
         
         self.train_loader, self.test_loader = self.load_data()
-        print(f"Client {self.client_id} initialized. Using device: {DEVICE}")
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        
+        # Initialize Opacus PrivacyEngine
+        self.privacy_engine = PrivacyEngine()
+
+        print(f"Client {self.client_id} initialized with PathMNIST data. Using device: {DEVICE}")
 
     def load_data(self):
-        # ... (This function is unchanged)
         transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=[.5], std=[.5])])
         data = np.load(self.data_path)
         if self.client_id == 'hospital-A':
@@ -70,29 +88,33 @@ class FLClient:
         test_labels_tensor = torch.tensor(test_labels, dtype=torch.long).squeeze()
         train_dataset = TensorDataset(train_images_tensor, train_labels_tensor)
         test_dataset = TensorDataset(test_images_tensor, test_labels_tensor)
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, drop_last=True) # drop_last needed for Opacus
         test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
         return train_loader, test_loader
 
-    def pack_weights(self, model):
-        return np.concatenate([p.data.cpu().numpy().flatten() for p in model.parameters()])
+    def get_weights(self):
+        # Ensure weights are returned from CPU for numpy conversion
+        return np.concatenate([p.data.cpu().numpy().flatten() for p in self.model.parameters()])
 
-    def unpack_weights(self, model, weights: np.ndarray):
+    def set_weights(self, weights: np.ndarray):
         state_dict = OrderedDict()
         start = 0
-        for name, param in model.named_parameters():
+        # Ensure model parameters are on the correct device before loading state
+        self.model.to(DEVICE)
+        for name, param in self.model.named_parameters():
             end = start + param.numel()
-            state_dict[name] = torch.from_numpy(weights[start:end].reshape(param.shape))
+            # Ensure loaded tensor is on the same device as the parameter
+            state_dict[name] = torch.from_numpy(weights[start:end].reshape(param.shape)).to(param.device)
             start = end
-        model.load_state_dict(state_dict)
+        self.model.load_state_dict(state_dict)
 
-    def evaluate_model(self):
+    def evaluate(self):
         self.model.eval()
         correct, total, loss = 0, 0, 0.0
         criterion = nn.CrossEntropyLoss()
         with torch.no_grad():
             for images, labels in self.test_loader:
-                # --- 3. Move data to the device for evaluation ---
+                # Move data to the device for evaluation
                 images, labels = images.to(DEVICE), labels.to(DEVICE)
                 
                 outputs = self.model(images)
@@ -105,32 +127,80 @@ class FLClient:
         avg_loss = loss / len(self.test_loader) if len(self.test_loader) > 0 else 0
         return avg_loss, accuracy
 
-    def perform_local_training(self, initial_weights_np: np.ndarray):
+    def train(self):
         print(f"Performing local training for {self.local_epochs} epochs...")
-        # --- 4. Move the training model to the device ---
-        training_model = Net(num_classes=self.model.fc.out_features).to(DEVICE)
-        self.unpack_weights(training_model, initial_weights_np)
-        training_model.train()
-        
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(training_model.parameters(), lr=self.learning_rate)
-        
-        for epoch in range(self.local_epochs):
-            for images, labels in self.train_loader:
-                # --- 5. Move data to the device for training ---
-                images, labels = images.to(DEVICE), labels.to(DEVICE)
-                
-                optimizer.zero_grad()
-                outputs = training_model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(training_model.parameters(), self.grad_clip_norm)
-                optimizer.step()
-        
-        print("Local training complete.")
-        return self.pack_weights(training_model)
 
-    # ... (All communication methods and the run loop are unchanged)
+        # --- THIS IS THE FIX ---
+        # Set the model to training mode BEFORE attaching Opacus
+        self.model.train()
+
+        # Detach previous engine if exists, re-create optimizer
+        if hasattr(self.privacy_engine, 'steps'): # Check if engine was previously attached
+            self.privacy_engine.detach()
+            
+        # Re-create optimizer (important for Opacus)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+
+        # Attach Opacus PrivacyEngine
+        # Note: Opacus modifies the model and optimizer in-place
+        model, optimizer, train_loader = self.privacy_engine.make_private_with_epsilon(
+            module=self.model,
+            optimizer=self.optimizer,
+            data_loader=self.train_loader,
+            epochs=self.local_epochs,
+            target_epsilon=self.target_epsilon,
+            target_delta=self.target_delta,
+            max_grad_norm=self.max_grad_norm,
+        )
+        # Update references although they might be modified in-place
+        self.model = model
+        self.optimizer = optimizer
+
+        criterion = nn.CrossEntropyLoss()
+        
+        # Modified Training Loop for Opacus
+        for epoch in range(self.local_epochs):
+            with BatchMemoryManager(
+                data_loader=train_loader,
+                max_physical_batch_size=int(self.batch_size / 2), # Use smaller physical batch if memory is an issue
+                optimizer=self.optimizer
+            ) as memory_safe_data_loader:
+                for images, labels in memory_safe_data_loader:
+                    # Move data to the device for training
+                    images, labels = images.to(DEVICE), labels.to(DEVICE)
+                    
+                    self.optimizer.zero_grad()
+                    outputs = self.model(images)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    # Gradient clipping is handled by Opacus optimizer step
+                    self.optimizer.step()
+
+        print("Local training complete.")
+        # Epsilon calculation (optional, for logging)
+        epsilon = self.privacy_engine.get_epsilon(self.target_delta)
+        print(f"Privacy budget spent this round: ε = {epsilon:.2f}, δ = {self.target_delta}")
+
+
+    def submit_model_update(self, update: np.ndarray):
+        # DP is handled by Opacus, no manual clipping/noising here.
+        private_update = update
+        
+        final_update = private_update
+        if self.round_info["partner_id"]:
+            # Secure Aggregation masking remains the same
+            print(f"Applying SecAgg mask with partner {self.round_info['partner_id']}.")
+            rng = np.random.RandomState(self.round_info["shared_seed"])
+            mask = rng.randn(len(final_update)).astype(np.float32)
+            if self.client_id < self.round_info["partner_id"]: final_update += mask
+            else: final_update -= mask
+        
+        try:
+            req = federated_pb2.ModelUpdateRequest(client_id=self.client_id, round_number=self.current_round, weights=final_update.tobytes())
+            self.stub.SubmitModelUpdate(req)
+            print(f"Update for round {self.current_round} sent.")
+        except grpc.RpcError: pass
+
     def register_with_server(self):
         try:
             req = federated_pb2.ClientRegistrationRequest(client_id=self.client_id)
@@ -146,40 +216,19 @@ class FLClient:
             if res.status == federated_pb2.COMPLETED:
                 print("\n--- FEDERATED TRAINING COMPLETE ---")
                 final_weights = np.frombuffer(res.weights, dtype=np.float32).copy()
-                self.unpack_weights(self.model, final_weights)
+                self.set_weights(final_weights)
                 np.save(f"final_model_{self.client_id}.npy", final_weights)
                 print(f"Final model saved locally to 'final_model_{self.client_id}.npy'")
                 return "TRAINING_COMPLETE"
             if res.round_number > self.current_round:
                 print(f"\nNew model for round {res.round_number} received.")
                 self.current_round = res.round_number
-                weights = np.frombuffer(res.weights, dtype=np.float32).copy()
-                self.unpack_weights(self.model, weights)
-                self.round_info = {"initial_weights": weights, "partner_id": res.partner_id, "shared_seed": res.shared_seed}
+                initial_weights = np.frombuffer(res.weights, dtype=np.float32).copy()
+                self.set_weights(initial_weights)
+                self.round_info = {"initial_weights": initial_weights, "partner_id": res.partner_id, "shared_seed": res.shared_seed}
                 return True
             return False
         except grpc.RpcError: return False
-
-    def submit_model_update(self, update: np.ndarray):
-        norm = np.linalg.norm(update)
-        if norm > self.clipping_bound: update = update * (self.clipping_bound / norm)
-        if self.noise_multiplier > 0.0:
-            noise = np.random.normal(0, self.clipping_bound * self.noise_multiplier, size=update.shape).astype(np.float32)
-            private_update = update + noise
-        else:
-            private_update = update
-        final_update = private_update
-        if self.round_info["partner_id"]:
-            print(f"Applying SecAgg mask with partner {self.round_info['partner_id']}.")
-            rng = np.random.RandomState(self.round_info["shared_seed"])
-            mask = rng.randn(len(final_update)).astype(np.float32)
-            if self.client_id < self.round_info["partner_id"]: final_update += mask
-            else: final_update -= mask
-        try:
-            req = federated_pb2.ModelUpdateRequest(client_id=self.client_id, round_number=self.current_round, weights=final_update.tobytes())
-            self.stub.SubmitModelUpdate(req)
-            print(f"Update for round {self.current_round} sent.")
-        except grpc.RpcError: pass
 
     def submit_evaluation_result(self, loss: float, metric: float):
         try:
@@ -195,21 +244,22 @@ class FLClient:
                 print("Client shutting down.")
                 break
             if status == True:
-                loss, acc = self.evaluate_model()
+                loss, acc = self.evaluate()
                 print(f"  - Evaluated global model (Round {self.current_round}): Loss = {loss:.4f}, Accuracy = {acc:.4f}")
                 self.submit_evaluation_result(loss, acc)
-                # The subtraction is now done inside submit_model_update logic
-                trained_weights = self.perform_local_training(self.round_info["initial_weights"])
-                update = trained_weights - self.round_info["initial_weights"]
+                initial_weights = self.round_info["initial_weights"]
+                self.train() # Train modifies self.model in-place
+                new_weights = self.get_weights()
+                update = new_weights - initial_weights
                 self.submit_model_update(update)
             print("Waiting for the next round...")
             time.sleep(5)
-            
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Federated Learning Client (gRPC)")
     parser.add_argument("--client-id", type=str, required=True)
     parser.add_argument("--data-path", type=str, required=True)
     args = parser.parse_args()
-    
     client = FLClient(client_id=args.client_id, data_path=args.data_path)
     client.run()
