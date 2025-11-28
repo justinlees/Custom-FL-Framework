@@ -59,7 +59,15 @@ a. You can download the official PathMNIST dataset here : https://zenodo.org/rec
 
 ## Step-3: Start the Federated Learning (localmachine)
 
-a. Open multiple terminals which acts as multiple edge devices.
+a.Run the following command for the required dataset splits according to the no.of clients:
+
+```
+python split_data.py
+```
+
+### NOTE: We are splitting data to mimic the iid data in real-world scenario. Since the clients doesn't have iid data we are splitting the orginal data for training.
+
+b. Open multiple terminals which acts as multiple edge devices.
 
 #### NOTE: Make sure to open every terminal in venv
 
