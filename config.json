@@ -1,12 +1,12 @@
 {
-  "clients_per_round": 10,
+  "clients_per_round": 3,
   "total_rounds": 100,
   "model_architecture": {
     "num_classes": 9,
     "total_weights_count": 19209
   },
   "training_params": {
-    "local_epochs": 1,
+    "local_epochs": 2,
     "learning_rate": 0.0005,
     "batch_size": 128,
     "grad_clip_norm": 1.0

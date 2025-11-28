@@ -8,7 +8,7 @@ This framework implements the Federated learning task but currently does not sup
 
     This Framework also provides privacy by implementing Differential Privacy(DP) and Secure-Agg mechanisms. So the local gradients will be secured against Gradient and Model inversion attacks.
 
-Below, we mentioned the steps to follow for using this framework start Federated Learning and predict the new unseen data.
+Below, we mentioned the steps to follow for using this framework to start Federated Learning and predict the new unseen data.
 
 #### NOTE:Currently this framework doesn't have a global server. So we have provided the server files as well to run at your system.
 
@@ -39,8 +39,10 @@ c. Now install all the libraries required for the framework to run:
 ```
 (installs dependencies)
 pip install -r requirements.txt
+if nvidia GPU present:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
+else:
+pip install torch torchvision
 ```
 
 d. Now run the below command for gRPC protobuf working:
@@ -68,17 +70,17 @@ python -m fl-server.server
 
 ```
 
-One for hospitalA:
+One for hospital1:
 
 ```
-python fl_client.py --client-id="hospital-A" --data-path="pathmnist.npz"
+python fl_client.py --client-id="hospital-1" --data-path="hospital_1_data.npz"
 
 ```
 
-One for hospitalB:
+One for hospital2:
 
 ```
-python fl_client.py --client-id="hospital-B" --data-path="pathmnist.npz"
+python fl_client.py --client-id="hospital-2" --data-path="hospital_2_data.npz"
 
 ```
 
@@ -86,8 +88,15 @@ At the end of the training, the local model for each client will be downloaded a
 
 ## Step-4: Start the Federated learning (Same Network)
 
-a. As mentioned in the context, you need to change the SERVER_ADDRESS value to networks IPv$ address in fl_client.py
+a. As mentioned in the context, you need to change the SERVER_ADDRESS value to networks IPv4 address in fl_client.py
 b. Make sure the devices are running on the same network as server.
-c. Follow the same commands as in the localmachine step(one client runs hospitalA and other runs hospitalB and server runs server command).
+c. First run the split_data.py for getting dataset splits according to no.of clients participating.
+d. Share the datasets to the clients.
+
+### NOTE: We are splitting data to mimic the iid data in real-world scenario. Since the clients doesn't have iid data we are splitting the orginal data for training.
+
+e. Follow the same commands as in the localmachine step(one client runs hospitalA and other runs hospitalB and server runs server command).
 
 ## Step-5: To stop learning, press ctrl+c on server.
+
+For modifying the training parameters, change the parameters in config.json
