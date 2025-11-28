@@ -3,6 +3,9 @@ numpy
 pandas
 scikit-learn
 
+#visualization
+matplotlib
+
 #Privacy Library
 opacus
 
