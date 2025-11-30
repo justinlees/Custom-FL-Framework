@@ -4,6 +4,7 @@ import argparse
 import json
 import grpc
 from collections import OrderedDict
+import matplotlib.pyplot as plt # Added for plotting
 
 import torch
 import torch.nn as nn
@@ -11,17 +12,14 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from torchvision import transforms
 
-# Opacus imports for Differential Privacy
+# Opacus imports
 from opacus import PrivacyEngine
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 import federated_pb2
 import federated_pb2_grpc
 
-# Default address; can be overridden if needed but usually set in main call
-SERVER_ADDRESS = 'localhost:50051' 
-
-# --- Auto-detect and set the device (GPU or CPU) ---
+SERVER_ADDRESS = 'localhost:50051'
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Net(nn.Module):
@@ -50,8 +48,6 @@ class FLClient:
         self.data_path = data_path
         self.current_round = -1
 
-        # Establish gRPC connection
-        # Note: In a real multi-PC setup, you might want to pass server address as an arg
         self.channel = grpc.insecure_channel(SERVER_ADDRESS)
         self.stub = federated_pb2_grpc.FederatedLearningStub(self.channel)
 
@@ -65,30 +61,21 @@ class FLClient:
         self.target_epsilon = config['privacy_params']['target_epsilon']
         self.max_grad_norm = config['privacy_params']['max_grad_norm']
         
-        # Initialize model and move to device
         self.model = Net(num_classes=config['model_architecture']['num_classes']).to(DEVICE)
-        
-        # Initialize data loaders
         self.train_loader, self.test_loader = self.load_data()
-        
-        # Initialize optimizer (Stateful!)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        
-        # Initialize Opacus PrivacyEngine
         self.privacy_engine = PrivacyEngine()
+
+        # --- ADDED: History Storage ---
+        self.history = {'rounds': [], 'loss': [], 'acc': []}
 
         print(f"Client {self.client_id} initialized with data from {self.data_path}. Using device: {DEVICE}")
 
     def load_data(self):
-        """
-        Generic data loader that loads whatever .npz file is provided in self.data_path.
-        Does NOT use client_id to slice data anymore.
-        """
+        # (Generic data loading logic - same as before)
         transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=[.5], std=[.5])])
-        
         try:
             data = np.load(self.data_path)
-            # Load all data available in this specific file
             train_images = data['train_images']
             train_labels = data['train_labels']
             test_images = data['test_images']
@@ -97,33 +84,27 @@ class FLClient:
             print(f"Error loading data from {self.data_path}: {e}")
             exit()
 
-        # Apply transformations and convert to PyTorch tensors
         train_images_tensor = torch.stack([transform(img) for img in train_images])
-        # Ensure labels are Long type and squeezed
-        train_labels_tensor = torch.tensor(train_labels, dtype=torch.long).squeeze() 
+        train_labels_tensor = torch.tensor(train_labels, dtype=torch.long).squeeze()
         test_images_tensor = torch.stack([transform(img) for img in test_images])
         test_labels_tensor = torch.tensor(test_labels, dtype=torch.long).squeeze()
         
         train_dataset = TensorDataset(train_images_tensor, train_labels_tensor)
         test_dataset = TensorDataset(test_images_tensor, test_labels_tensor)
         
-        # drop_last=True is required for Opacus to ensure consistent batch sizes
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
         test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
         return train_loader, test_loader
 
     def get_weights(self):
-        # Return weights as a flat numpy array from CPU
         return np.concatenate([p.data.cpu().numpy().flatten() for p in self.model.parameters()])
 
     def set_weights(self, weights: np.ndarray):
         state_dict = OrderedDict()
         start = 0
-        # Ensure model is on correct device
         self.model.to(DEVICE)
         for name, param in self.model.named_parameters():
             end = start + param.numel()
-            # Load tensor to the correct device
             state_dict[name] = torch.from_numpy(weights[start:end].reshape(param.shape)).to(DEVICE)
             start = end
         self.model.load_state_dict(state_dict)
@@ -134,9 +115,7 @@ class FLClient:
         criterion = nn.CrossEntropyLoss()
         with torch.no_grad():
             for images, labels in self.test_loader:
-                # Move data to device
                 images, labels = images.to(DEVICE), labels.to(DEVICE)
-                
                 outputs = self.model(images)
                 loss = criterion(outputs, labels)
                 loss_sum += loss.item()
@@ -150,18 +129,11 @@ class FLClient:
 
     def train(self):
         print(f"Performing local training for {self.local_epochs} epochs...")
-        
-        # 1. Set model to training mode BEFORE attaching Opacus
         self.model.train()
-
-        # 2. Detach previous engine if exists
         if hasattr(self.privacy_engine, 'steps'): 
             self.privacy_engine.detach()
-            
-        # 3. Re-create optimizer (important for Opacus state management across rounds)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
-        # 4. Attach Opacus PrivacyEngine
         model, optimizer, train_loader = self.privacy_engine.make_private_with_epsilon(
             module=self.model,
             optimizer=self.optimizer,
@@ -171,23 +143,18 @@ class FLClient:
             target_delta=self.target_delta,
             max_grad_norm=self.max_grad_norm,
         )
-        
         self.model = model
         self.optimizer = optimizer
-
         criterion = nn.CrossEntropyLoss()
         
-        # 5. Training loop
         for epoch in range(self.local_epochs):
             with BatchMemoryManager(
                 data_loader=train_loader,
-                max_physical_batch_size=self.batch_size, # Adjust if OOM
+                max_physical_batch_size=self.batch_size // 2,
                 optimizer=self.optimizer
             ) as memory_safe_data_loader:
                 for images, labels in memory_safe_data_loader:
-                    # Move data to device
                     images, labels = images.to(DEVICE), labels.to(DEVICE)
-                    
                     self.optimizer.zero_grad()
                     outputs = self.model(images)
                     loss = criterion(outputs, labels)
@@ -199,11 +166,8 @@ class FLClient:
         print(f"Privacy budget spent this round: ε = {epsilon:.2f}, δ = {self.target_delta}")
 
     def submit_model_update(self, update: np.ndarray):
-        # DP is handled by Opacus. This function just handles SecAgg and Sending.
         private_update = update 
-        
         final_update = private_update
-        # Apply Secure Aggregation mask if partner exists
         if self.round_info["partner_id"]:
             print(f"Applying SecAgg mask with partner {self.round_info['partner_id']}.")
             rng = np.random.RandomState(self.round_info["shared_seed"])
@@ -245,6 +209,10 @@ class FLClient:
                 self.set_weights(final_weights)
                 np.save(f"final_model_{self.client_id}.npy", final_weights)
                 print(f"Final model saved locally to 'final_model_{self.client_id}.npy'")
+                
+                # --- ADDED: Plot results on completion ---
+                self.plot_results()
+                
                 return "TRAINING_COMPLETE"
 
             if res.round_number > self.current_round:
@@ -271,6 +239,41 @@ class FLClient:
         except grpc.RpcError as e: 
             print(f"Error submitting evaluation: {e}")
 
+    # --- ADDED: Plotting Function ---
+    def plot_results(self):
+        """Generates a plot of the client's local training history."""
+        rounds = self.history['rounds']
+        loss = self.history['loss']
+        acc = self.history['acc']
+
+        if not rounds:
+            print("No training history to plot.")
+            return
+
+        plt.figure(figsize=(10, 5))
+
+        # Plot Loss
+        plt.subplot(1, 2, 1)
+        plt.plot(rounds, loss, label='Local Loss')
+        plt.title(f'Client {self.client_id} Loss')
+        plt.xlabel('Round')
+        plt.ylabel('Loss')
+        plt.yscale('log')
+        plt.grid(True)
+
+        # Plot Accuracy
+        plt.subplot(1, 2, 2)
+        plt.plot(rounds, acc, label='Local Accuracy', color='orange')
+        plt.title(f'Client {self.client_id} Accuracy')
+        plt.xlabel('Round')
+        plt.ylabel('Accuracy')
+        plt.grid(True)
+
+        filename = f'client_{self.client_id}_results.png'
+        plt.tight_layout()
+        plt.savefig(filename)
+        print(f"Local training graph saved to '{filename}'")
+
     def run(self):
         if not self.register_with_server(): return
         
@@ -285,8 +288,13 @@ class FLClient:
                 print(f"  - Evaluated global model (Round {self.current_round}): Loss = {loss:.4f}, Accuracy = {acc:.4f}")
                 self.submit_evaluation_result(loss, acc)
                 
+                # --- ADDED: Record metrics for plotting ---
+                self.history['rounds'].append(self.current_round)
+                self.history['loss'].append(loss)
+                self.history['acc'].append(acc)
+                
                 initial_weights = self.round_info["initial_weights"]
-                self.train() # Train modifies self.model in-place (cumulative learning)
+                self.train() 
                 new_weights = self.get_weights()
                 update = new_weights - initial_weights
                 
